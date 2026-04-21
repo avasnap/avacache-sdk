@@ -35,7 +35,7 @@ all      = ["duckdb>=1.0", "pandas>=2.0", "polars>=0.20", "tqdm>=4.66", "ipython
 dev      = ["pytest>=7.0", "respx>=0.21", "ruff"]
 
 [project.urls]
-Homepage = "https://github.com/TBD/avacache"
+Homepage = "https://github.com/avasnap/avacache-sdk"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/avacache"]

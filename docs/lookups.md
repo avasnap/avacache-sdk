@@ -12,8 +12,7 @@ Use this when you want to turn:
   `Transfer(address,address,uint256)`
 
 The archive contract for these files lives in
-[docs/archive-contract.md](/ssd/aidev/avacache-sdk/docs/archive-contract.md)
-and `../cache/docs/ARCHIVE_SCHEMA.md`.
+[archive-contract.md](archive-contract.md).
 
 ## What `manifest.lookups` Contains
 

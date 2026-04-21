@@ -118,6 +118,8 @@ The Python SDK also supports strict offline mode with `AVACACHE_OFFLINE=1`.
   one in-memory result.
 - Use Python `iter_range()` for large spans; it yields one decoded day at a time
   and prefetches ahead.
+- Use Python `prune_cache()` to trim old cached parquet files when local disk
+  usage matters.
 - Use `url_for()` / `urlFor()` if another engine will read the parquet for you.
 - Use the optional DuckDB helpers when you want SQL over the archive without
   learning the file layout.
