@@ -1,0 +1,64 @@
+{
+  "name": "avacache",
+  "version": "0.1.0",
+  "description": "Isomorphic TypeScript client for the public Avalanche C-Chain parquet archive.",
+  "license": "CC-BY-4.0",
+  "keywords": [
+    "avalanche",
+    "blockchain",
+    "parquet",
+    "dataset",
+    "c-chain"
+  ],
+  "sideEffects": false,
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./duckdb": {
+      "types": "./dist/duckdb.d.ts",
+      "import": "./dist/duckdb.js",
+      "require": "./dist/duckdb.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "hyparquet": "^1.0.0",
+    "hyparquet-compressors": "^1.1.1",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@duckdb/duckdb-wasm": "^1.33.1-dev45.0",
+    "@types/node": "^20.0.0",
+    "msw": "^2.3.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  },
+  "peerDependencies": {
+    "@duckdb/duckdb-wasm": "^1.28.0"
+  },
+  "peerDependenciesMeta": {
+    "@duckdb/duckdb-wasm": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
