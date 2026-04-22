@@ -18,14 +18,21 @@ independent packages that happen to implement the same archive contract.
 
 ## What The Archive Contains
 
-The public archive is organized around three daily parquet files per UTC date:
+The public archive is organized around three daily parquet files per UTC date,
+plus static JSON lookup tables for decoding raw hex:
 
 ```text
 manifest.json
 daily/YYYY-MM-DD.blocks.parquet
 daily/YYYY-MM-DD.txs.parquet
 daily/YYYY-MM-DD.events.parquet
+lookups/function_selectors.json   # 4-byte selector → signature / ABI
+lookups/event_topics.json         # topic0 hash    → signature / ABI
 ```
+
+Join `txs.input_prefix` against `function_selectors` and `events.topic0`
+against `event_topics` to attach human-readable signatures to raw rows.
+See [docs/lookups.md](docs/lookups.md) for verified-fetch examples.
 
 The manifest is authoritative. It tells clients:
 
