@@ -30,9 +30,13 @@ manifest, then ask for the latest complete date.
 ### Python
 
 ```python
+import json
+from urllib.request import urlopen
+
 from avacache import Client
 
 with Client() as c:
+    manifest = c.manifest()
     latest = c.latest_complete_date()
     if latest is None:
         raise RuntimeError("archive has no complete dates yet")
@@ -41,8 +45,31 @@ with Client() as c:
     txs = c.load_day(latest, "txs")
     events = c.load_day(latest, "events")
 
+    selector_url = (
+        f"{c.base_url.rstrip('/')}/{manifest.lookups['function_selectors'].key}"
+    )
+    topic_url = f"{c.base_url.rstrip('/')}/{manifest.lookups['event_topics'].key}"
+
+    with urlopen(selector_url) as response:
+        selector_lookup = json.loads(response.read())
+    with urlopen(topic_url) as response:
+        topic_lookup = json.loads(response.read())
+
+    sample_tx = txs.slice(0, 1).to_pylist()[0]
+    sample_event = events.slice(0, 1).to_pylist()[0]
+
     print(latest)
     print(blocks.num_rows, txs.num_rows, events.num_rows)
+    print(
+        "tx selector:",
+        sample_tx["input_prefix"],
+        selector_lookup.get(sample_tx["input_prefix"], {}).get("signature"),
+    )
+    print(
+        "event topic0:",
+        sample_event["topic0"],
+        topic_lookup.get(sample_event["topic0"], {}).get("signature"),
+    )
 ```
 
 ### TypeScript
@@ -51,23 +78,47 @@ with Client() as c:
 import { Client } from 'avacache';
 
 const c = new Client();
+const manifest = await c.manifest();
 const latest = await c.latestCompleteDate();
 
 if (!latest) {
   throw new Error('archive has no complete dates yet');
 }
 
-const [blocks, txs, events] = await Promise.all([
+const [blocks, txs, events, selectorLookup, topicLookup] = await Promise.all([
   c.loadDay(latest, 'blocks'),
   c.loadDay(latest, 'txs'),
   c.loadDay(latest, 'events'),
+  fetch(
+    `${c.baseUrl.replace(/\/$/, '')}/${manifest.lookups.function_selectors.key}`,
+  ).then((response) => response.json()),
+  fetch(
+    `${c.baseUrl.replace(/\/$/, '')}/${manifest.lookups.event_topics.key}`,
+  ).then((response) => response.json()),
 ]);
 
+const sampleTx = txs[0];
+const sampleEvent = events[0];
+
 console.log(latest, blocks.length, txs.length, events.length);
+console.log(
+  'tx selector:',
+  sampleTx?.input_prefix,
+  selectorLookup[sampleTx?.input_prefix as string]?.signature,
+);
+console.log(
+  'event topic0:',
+  sampleEvent?.topic0,
+  topicLookup[sampleEvent?.topic0 as string]?.signature,
+);
 ```
 
 Use this pattern when you want the freshest day that is known to be complete
-for all three kinds.
+for all three kinds and you also want immediate human-readable labels for
+`txs.input_prefix` and `events.topic0`.
+
+For production lookup caches, verify the raw JSON body against the published
+`size` and `md5` in `manifest.lookups` as shown in [lookups.md](lookups.md).
 
 ## Enumerate Available Dates And Spot Gaps
 
