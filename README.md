@@ -102,11 +102,21 @@ TypeScript if you want raw strings.
 
 ## Cache And Integrity
 
-Both SDKs cache downloaded parquet locally by default.
+Both SDKs cache downloaded parquet locally. The location is configurable —
+defaults are only defaults.
+
+Defaults:
 
 - Python: `~/.cache/avacache/v1/<chain_id>/daily/`
 - TypeScript in Node: `~/.cache/avacache/v1/<chain_id>/`
 - TypeScript in browsers: IndexedDB (`avacache-v1-<chain_id>`)
+
+Override the location in any of three ways (all SDKs, Node and Python):
+
+- Set the `AVACACHE_CACHE_DIR` environment variable
+- Pass `cache_dir=...` to `Client(...)` in Python
+- Pass `cacheDir: '...'` to `new Client({ ... })` in TypeScript (Node only;
+  the browser cache is fixed to IndexedDB)
 
 Integrity behavior:
 
