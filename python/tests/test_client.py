@@ -122,3 +122,12 @@ def test_available_dates(mock_archive, tmp_cache):
 def test_latest_complete_date(mock_archive, tmp_cache):
     c = _make(mock_archive, tmp_cache)
     assert c.latest_complete_date() == date(2026, 4, 18)
+
+
+@respx.mock
+def test_invalid_kind_fails_fast(mock_archive, tmp_cache):
+    c = _make(mock_archive, tmp_cache)
+    with pytest.raises(ValueError, match="unknown kind"):
+        c.load_day("2026-04-18", "block")  # singular typo
+    with pytest.raises(ValueError, match="unknown kind"):
+        c.available_dates("txn")

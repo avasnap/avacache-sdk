@@ -109,13 +109,34 @@ export function makeIndexedDbCache(chainId: number): Cache {
   const dbName = `avacache-v1-${chainId}`;
   const store = 'blobs';
 
-  const open = () =>
-    new Promise<IDBDatabase>((resolve, reject) => {
-      const req = indexedDB.open(dbName, 1);
-      req.onupgradeneeded = () => req.result.createObjectStore(store);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
+  // Open the database once per cache instance. Re-opening on every
+  // get/put leaks IDBDatabase handles in long-running tabs and blocks
+  // version upgrades elsewhere on the origin. IndexedDB's recommended
+  // usage is to hold the connection for the lifetime of the consumer.
+  let dbPromise: Promise<IDBDatabase> | undefined;
+  const open = (): Promise<IDBDatabase> => {
+    if (!dbPromise) {
+      dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
+        const req = indexedDB.open(dbName, 1);
+        req.onupgradeneeded = () => req.result.createObjectStore(store);
+        req.onsuccess = () => {
+          const db = req.result;
+          // If another tab triggers a version upgrade, drop our cached
+          // handle so it doesn't block the upgrade indefinitely.
+          db.onversionchange = () => {
+            db.close();
+            dbPromise = undefined;
+          };
+          resolve(db);
+        };
+        req.onerror = () => {
+          dbPromise = undefined;
+          reject(req.error);
+        };
+      });
+    }
+    return dbPromise;
+  };
 
   return {
     async get(key: string): Promise<Uint8Array | null> {
@@ -123,13 +144,18 @@ export function makeIndexedDbCache(chainId: number): Cache {
       return new Promise((resolve, reject) => {
         const tx = db.transaction(store, 'readonly');
         const req = tx.objectStore(store).get(key);
+        let result: Uint8Array | null = null;
         req.onsuccess = () => {
           const v = req.result as ArrayBuffer | Uint8Array | undefined;
-          if (!v) return resolve(null);
-          // Accept both legacy ArrayBuffer entries and new Uint8Array entries.
-          resolve(v instanceof Uint8Array ? new Uint8Array(v) : new Uint8Array(v));
+          if (!v) return;
+          // Accept both legacy ArrayBuffer entries and Uint8Array entries.
+          // Copy so the caller doesn't share IndexedDB-owned memory.
+          result = v instanceof Uint8Array ? new Uint8Array(v) : new Uint8Array(v);
         };
-        req.onerror = () => reject(req.error);
+        // Resolve on tx.oncomplete (not req.onsuccess) so we don't return
+        // before the transaction is durable.
+        tx.oncomplete = () => resolve(result);
+        tx.onerror = () => reject(tx.error);
       });
     },
     async put(key: string, bytes: Uint8Array): Promise<void> {

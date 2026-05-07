@@ -40,6 +40,11 @@ export interface LoadOptions {
   decodeHex?: boolean;
 }
 
+export interface IterRangeOptions extends LoadOptions {
+  /** Max files in flight at once. Default 4. */
+  concurrency?: number;
+}
+
 function md5Hex(bytes: Uint8Array): Promise<string> {
   if (isNode()) {
     return import('node:crypto').then(({ createHash }) =>
@@ -247,20 +252,60 @@ export class Client {
     start: string,
     end: string,
     kind: Kind,
-    opts: LoadOptions = {},
+    opts: IterRangeOptions = {},
   ): Promise<Row[]> {
+    const all: Row[] = [];
+    for await (const [, rows] of this.iterRange(start, end, kind, opts)) {
+      for (const r of rows) all.push(r);
+    }
+    return all;
+  }
+
+  /**
+   * Yield `[date, rows]` pairs in date order, with up to `concurrency`
+   * downloads in flight at once. Memory: one decoded day held by the SDK
+   * at a time (the consumer holds whatever it accumulates).
+   *
+   * Prefer this over `loadRange` for multi-month spans of `txs` or
+   * `events`, which can OOM the process if held all at once.
+   */
+  async *iterRange(
+    start: string,
+    end: string,
+    kind: Kind,
+    opts: IterRangeOptions = {},
+  ): AsyncGenerator<[string, Row[]], void, void> {
     if (end < start) throw new Error('end before start');
     const m = await this.manifest();
     const dates = manifestDates(m, kind).filter((d) => d >= start && d <= end);
     if (dates.length === 0) {
       throw new Error(`no ${kind} files in range ${start}..${end}`);
     }
-    const all: Row[] = [];
-    for (const d of dates) {
-      const rows = await this.loadDay(d, kind, opts);
-      for (const r of rows) all.push(r);
+
+    const concurrency = Math.max(1, opts.concurrency ?? 4);
+    // Sliding window of pending fetches. We keep at most `concurrency`
+    // promises in flight: prime the first N, then schedule the (i+N)th
+    // when we yield the i-th. While the consumer processes a yielded
+    // value, the next N are downloading in the background.
+    const inFlight: Promise<Row[]>[] = [];
+    const enqueue = (idx: number): void => {
+      const p = this.loadDay(dates[idx], kind, opts);
+      // Attach a no-op handler so V8 doesn't fire an unhandled-rejection
+      // warning between scheduling and the eventual await below; the real
+      // rejection still surfaces when we `await` the promise.
+      p.catch(() => {});
+      inFlight.push(p);
+    };
+
+    const prime = Math.min(concurrency, dates.length);
+    for (let i = 0; i < prime; i++) enqueue(i);
+
+    for (let i = 0; i < dates.length; i++) {
+      const rows = await inFlight[i];
+      const next = i + concurrency;
+      if (next < dates.length) enqueue(next);
+      yield [dates[i], rows];
     }
-    return all;
   }
 
   // -------------------------------------------------------------- Internals

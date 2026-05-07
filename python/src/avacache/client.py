@@ -48,6 +48,17 @@ def _maybe_pbar(total: int, enabled: bool | None, desc: str):
         return _Noop()
 
 Kind = Literal["blocks", "txs", "events"]
+_VALID_KINDS = ("blocks", "txs", "events")
+
+
+def _validate_kind(kind: str) -> Kind:
+    """Reject typos like 'block' early — by the time hex decoding raises,
+    the parquet has already been downloaded."""
+    if kind not in _VALID_KINDS:
+        raise ValueError(
+            f"unknown kind {kind!r}: expected one of {_VALID_KINDS}"
+        )
+    return kind  # type: ignore[return-value]
 
 DEFAULT_BASE_URL = "https://parquet.avacache.com"
 DEFAULT_CHAIN_ID = 43114
@@ -205,6 +216,7 @@ class Client:
         return json.loads(bytes(body))
 
     def available_dates(self, kind: Kind) -> list[date]:
+        kind = _validate_kind(kind)
         return self.manifest().dates(kind)
 
     def latest_complete_date(self) -> date | None:
@@ -214,6 +226,7 @@ class Client:
     # ---- Single day -------------------------------------------------------
 
     def load_day(self, d: str | date, kind: Kind) -> pa.Table:
+        kind = _validate_kind(kind)
         entry = self.manifest().entry(d, kind)
         if entry is None:
             raise FileNotFoundError(
@@ -230,6 +243,7 @@ class Client:
     def _range_tasks(
         self, start: str | date, end: str | date, kind: Kind,
     ) -> list[tuple[date, object]]:
+        kind = _validate_kind(kind)
         s, e = _parse_date(start), _parse_date(end)
         if e < s:
             raise ValueError("end before start")
