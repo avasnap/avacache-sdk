@@ -124,6 +124,42 @@ def test_latest_complete_date(mock_archive, tmp_cache):
 
 
 @respx.mock
+def test_load_range_warns_on_schema_drift(
+    respx_mock, archive_bytes, manifest_dict, tmp_cache,
+):
+    """A range spanning two schema versions should warn before concatenating."""
+    import hashlib as _h
+    from httpx import Response
+
+    base = "https://drift.example.test"
+    # Reuse the v2 blocks body for a second day, but tag it as schema v3.
+    body = archive_bytes["blocks"]
+    second_day = {
+        "date": "2026-04-19",
+        "kind": "blocks",
+        "key": "daily/2026-04-19.blocks.parquet",
+        "size": len(body),
+        "md5": _h.md5(body).hexdigest(),
+        "schema_version": "v3",
+    }
+    drifted = {**manifest_dict, "files": [*manifest_dict["files"], second_day]}
+
+    respx_mock.get(f"{base}/manifest.json").mock(return_value=Response(200, json=drifted))
+    for kind, b in archive_bytes.items():
+        respx_mock.get(f"{base}/daily/2026-04-18.{kind}.parquet").mock(
+            return_value=Response(200, content=b)
+        )
+    respx_mock.get(f"{base}/daily/2026-04-19.blocks.parquet").mock(
+        return_value=Response(200, content=body)
+    )
+
+    c = _make(base, tmp_cache)
+    with pytest.warns(UserWarning, match="multiple schema versions"):
+        t = c.load_range("2026-04-18", "2026-04-19", "blocks")
+    assert t.num_rows == 6  # 3 + 3
+
+
+@respx.mock
 def test_invalid_kind_fails_fast(mock_archive, tmp_cache):
     c = _make(mock_archive, tmp_cache)
     with pytest.raises(ValueError, match="unknown kind"):

@@ -1,5 +1,9 @@
 export { Client, DEFAULT_BASE_URL, DEFAULT_CHAIN_ID } from './client.js';
-export type { ClientOptions, LoadOptions } from './client.js';
+export type {
+  ClientOptions,
+  LoadOptions,
+  IterRangeOptions,
+} from './client.js';
 export type {
   FileEntry,
   Kind,

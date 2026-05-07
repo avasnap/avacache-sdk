@@ -7,6 +7,7 @@ import json
 import os
 import secrets
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
@@ -18,7 +19,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from avacache.hex import decode_hex_columns
-from avacache.manifest import Kind, Manifest
+from avacache.manifest import FileEntry, Kind, Manifest
 
 
 def _maybe_pbar(total: int, enabled: bool | None, desc: str):
@@ -241,13 +242,13 @@ class Client:
 
     def _range_tasks(
         self, start: str | date, end: str | date, kind: Kind,
-    ) -> list[tuple[date, object]]:
+    ) -> list[tuple[date, FileEntry]]:
         kind = _validate_kind(kind)
         s, e = _parse_date(start), _parse_date(end)
         if e < s:
             raise ValueError("end before start")
         manifest = self.manifest()
-        tasks: list[tuple[date, object]] = []
+        tasks: list[tuple[date, FileEntry]] = []
         d = s
         while d <= e:
             entry = manifest.entry(d, kind)
@@ -308,7 +309,24 @@ class Client:
 
         Beware memory: all days are held in RAM at once. For multi-month
         ranges of txs or events, prefer iter_range() and process day-by-day.
+
+        If the range spans multiple `schema_version`s, emits a UserWarning
+        before concatenating: pa.concat_tables(promote_options="default")
+        merges the union of columns and fills mismatches with nulls, which
+        can silently mask schema drift. Load each version separately if
+        you need the columns to be exact.
         """
+        tasks = self._range_tasks(start, end, kind)
+        versions = sorted({entry.schema_version for _, entry in tasks})
+        if len(versions) > 1:
+            warnings.warn(
+                f"load_range({start!s}..{end!s}, {kind!r}) spans multiple "
+                f"schema versions {versions}; mismatched columns will be "
+                "promoted to nullable and filled with nulls. Load each "
+                "version separately if column equivalence matters.",
+                UserWarning,
+                stacklevel=2,
+            )
         tables = [t for _, t in self.iter_range(
             start, end, kind, concurrency=concurrency, progress=progress,
         )]

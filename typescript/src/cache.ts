@@ -10,11 +10,18 @@
  * `Client({ cache: ... })` for SSR or testing.
  */
 
+/**
+ * Pluggable cache adapter for verified parquet bytes. Implement and pass
+ * via `Client({ cache })` to back the cache with custom storage (e.g. S3,
+ * Redis, IndexedDB in a Worker). `get` returns null on miss; `put` is
+ * fire-and-forget (errors should reject the returned promise).
+ */
 export interface Cache {
   get(key: string): Promise<Uint8Array | null>;
   put(key: string, bytes: Uint8Array): Promise<void>;
 }
 
+/** Cache that never stores anything. Use via `Client({ cache: false })` or pass directly. */
 export class NoopCache implements Cache {
   async get(): Promise<null> {
     return null;

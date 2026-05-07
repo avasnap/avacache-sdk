@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 export const KindSchema = z.enum(['blocks', 'txs', 'events']);
+/** Daily parquet category — one of `'blocks' | 'txs' | 'events'`. */
 export type Kind = z.infer<typeof KindSchema>;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -11,6 +12,7 @@ const LOOKUP_KEY_RE = /^lookups\/[A-Za-z0-9_-]+\.(json|json\.gz|parquet)$/;
 const dateString = z.string().regex(DATE_RE, 'expected YYYY-MM-DD');
 const md5String = z.string().regex(MD5_RE, 'expected 32 lowercase hex chars');
 
+/** Manifest entry for one daily parquet. The `key` is relative to the archive root. */
 export const FileEntrySchema = z.object({
   date: dateString,
   kind: KindSchema,
@@ -21,6 +23,7 @@ export const FileEntrySchema = z.object({
 });
 export type FileEntry = z.infer<typeof FileEntrySchema>;
 
+/** Manifest entry for a lookup file (e.g. function selectors, event topics). */
 export const LookupEntrySchema = z.object({
   key: z.string().regex(LOOKUP_KEY_RE, 'unsafe LookupEntry key'),
   size: z.number().int().nonnegative(),
@@ -28,6 +31,11 @@ export const LookupEntrySchema = z.object({
 });
 export type LookupEntry = z.infer<typeof LookupEntrySchema>;
 
+/**
+ * The archive's `manifest.json` shape — single source of truth for what
+ * exists in the bucket. `latest_complete_date` is the latest day for
+ * which all three kinds (`blocks`, `txs`, `events`) are published.
+ */
 export const ManifestSchema = z.object({
   chain_id: z.number().int(),
   generated_at: z.string(),

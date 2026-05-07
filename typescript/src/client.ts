@@ -24,24 +24,46 @@ const MANIFEST_MAX_BYTES = 16 * 1024 * 1024; // 16 MiB cap on manifest body
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 
 export interface ClientOptions {
+  /** EVM chain id of the archive to read. Default 43114 (Avalanche C-Chain). */
   chainId?: number;
+  /**
+   * Archive base URL. Trailing slashes are stripped. Must be `http(s)://`.
+   * Falls back to `process.env.AVACACHE_BASE_URL`, then to the public bucket.
+   */
   baseUrl?: string;
+  /**
+   * Custom cache adapter, or `false` to disable caching entirely.
+   * If omitted: Node uses an FS cache, browsers use IndexedDB, other
+   * runtimes (workers/edge) fall back to a no-op cache.
+   */
   cache?: Cache | false;
+  /**
+   * Cache directory for the Node FS cache. Falls back to
+   * `process.env.AVACACHE_CACHE_DIR`, then to `~/.cache/avacache/v1/`.
+   * Ignored when running in a browser.
+   */
   cacheDir?: string;
-  /** Decode hex numeric columns to bigint/number (default: true). */
+  /** Decode hex numeric columns to bigint/number on load. Default true. */
   decodeHex?: boolean;
+  /**
+   * Override `globalThis.fetch`. Useful for SSR and tests. Resolved lazily
+   * so passing a custom fetch works on Node versions without a global one.
+   */
   fetch?: typeof fetch;
   /** Per-request timeout in ms. Default 60000. */
   timeoutMs?: number;
 }
 
 export interface LoadOptions {
-  /** Override the per-client `decodeHex` setting. */
+  /** Override the per-client `decodeHex` setting for this call. */
   decodeHex?: boolean;
 }
 
 export interface IterRangeOptions extends LoadOptions {
-  /** Max files in flight at once. Default 4. */
+  /**
+   * Max files downloading in parallel while the consumer iterates.
+   * Default 4. Memory cost: roughly `concurrency` daily parquets in flight.
+   */
   concurrency?: number;
 }
 
@@ -113,6 +135,20 @@ async function readBodyCapped(
   return out;
 }
 
+/**
+ * Client for the public Avalanche C-Chain parquet archive.
+ *
+ * Reads `manifest.json` from the archive root, then fetches per-day
+ * `blocks` / `txs` / `events` parquet files, verifying size and md5 against
+ * the manifest before handing decoded rows to the caller.
+ *
+ * @example
+ *   const c = new Client();
+ *   const rows = await c.loadDay('2026-04-18', 'txs');
+ *   for await (const [date, day] of c.iterRange('2026-01-01', '2026-04-18', 'events')) {
+ *     // process one day at a time, bounded memory
+ *   }
+ */
 export class Client {
   readonly chainId: number;
   readonly baseUrl: string;
@@ -127,6 +163,7 @@ export class Client {
   // loadDay call within a long-lived Client.
   private readonly _verified = new Set<string>();
 
+  /** Construct a client. All options have sensible defaults; see `ClientOptions`. */
   constructor(opts: ClientOptions = {}) {
     this.chainId = opts.chainId ?? DEFAULT_CHAIN_ID;
     const envBase =
@@ -182,16 +219,24 @@ export class Client {
 
   // -------------------------------------------------------------- URLs
 
+  /** Build the public archive URL for a given day's parquet of `kind`. */
   urlFor(date: string, kind: Kind): string {
     return `${this.baseUrl}/daily/${date}.${kind}.parquet`;
   }
 
+  /** URL of the manifest.json at the archive root. */
   manifestUrl(): string {
     return `${this.baseUrl}/manifest.json`;
   }
 
   // -------------------------------------------------------------- Manifest
 
+  /**
+   * Fetch and parse `manifest.json`. The result is cached in memory for 5
+   * minutes; pass `force` to re-fetch immediately. The manifest's
+   * `chain_id` is cross-checked against the configured chain — a mismatch
+   * throws rather than poisoning the cache namespace.
+   */
   async manifest(force = false): Promise<Manifest> {
     const now = Date.now();
     if (!force && this._manifest && now - this._manifestAt < MANIFEST_TTL_MS) {
@@ -216,10 +261,20 @@ export class Client {
     return this._manifest;
   }
 
+  /**
+   * List the dates (YYYY-MM-DD) for which the manifest has a parquet of
+   * `kind`. Returns an empty array if the kind has no files yet — typos
+   * like `'block'` are caught at compile time by the `Kind` type.
+   */
   async availableDates(kind: Kind): Promise<string[]> {
     return manifestDates(await this.manifest(), kind);
   }
 
+  /**
+   * The latest date for which all of `blocks`, `txs`, and `events` are
+   * published, per the manifest. Useful as the default upper bound for
+   * range queries. Returns null if the manifest doesn't declare one.
+   */
   async latestCompleteDate(): Promise<string | null> {
     const m = await this.manifest();
     return m.latest_complete_date ?? null;
@@ -227,6 +282,13 @@ export class Client {
 
   // -------------------------------------------------------------- Load
 
+  /**
+   * Download (or read from cache) one day's parquet of `kind` and return
+   * the decoded rows. Throws if the manifest has no entry for that date.
+   *
+   * Hex columns are decoded by default — set `decodeHex: false` to keep
+   * the raw `0x...` strings (e.g. for round-tripping or custom decoding).
+   */
   async loadDay(
     date: string,
     kind: Kind,
@@ -248,6 +310,13 @@ export class Client {
     return rows;
   }
 
+  /**
+   * Load all days in `[start, end]` (inclusive) of `kind` and concatenate
+   * into a single array. Bounded prefetch via `concurrency` (default 4).
+   *
+   * Beware memory: every row is held at once. For multi-month spans of
+   * `txs` or `events`, prefer {@link iterRange} and consume day-by-day.
+   */
   async loadRange(
     start: string,
     end: string,
@@ -262,12 +331,17 @@ export class Client {
   }
 
   /**
-   * Yield `[date, rows]` pairs in date order, with up to `concurrency`
-   * downloads in flight at once. Memory: one decoded day held by the SDK
-   * at a time (the consumer holds whatever it accumulates).
+   * Yield `[date, rows]` pairs in date order with bounded prefetch. While
+   * the consumer processes one day, up to `concurrency` (default 4) more
+   * downloads run in the background, so iteration overlaps with I/O.
    *
-   * Prefer this over `loadRange` for multi-month spans of `txs` or
-   * `events`, which can OOM the process if held all at once.
+   * Memory: only one decoded day is held by the SDK at a time (the
+   * consumer holds whatever it accumulates). Prefer this over
+   * {@link loadRange} for multi-month spans of `txs` or `events`, which
+   * can OOM if held all at once.
+   *
+   * Throws if the date range contains no files for `kind`, or if `end`
+   * precedes `start`.
    */
   async *iterRange(
     start: string,

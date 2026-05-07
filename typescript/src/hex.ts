@@ -48,6 +48,14 @@ function colsForKind(kind: Kind): {
   }
 }
 
+/**
+ * One decoded row from a daily parquet. Schema varies by `kind`; consult
+ * `manifest.columns[kind]` for the authoritative column list.
+ *
+ * After {@link decodeRow}, wei-scale columns (e.g. `value`, `gas_price`)
+ * are `bigint`, small hex ints (e.g. `log_index`) are `number`, and the
+ * rest are whatever hyparquet decoded (string, number, boolean, null).
+ */
 export type Row = Record<string, unknown>;
 
 /** Mutates `row` in place, returning it. Converts known hex columns. */
