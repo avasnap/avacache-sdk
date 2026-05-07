@@ -14,9 +14,12 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import date
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator
 
 from avacache.client import Client
+
+if TYPE_CHECKING:
+    import duckdb  # type: ignore[import-not-found]
 
 
 @contextmanager

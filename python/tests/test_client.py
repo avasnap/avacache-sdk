@@ -59,7 +59,6 @@ def test_load_day_disable_decode(mock_archive, tmp_cache):
 def test_cache_hit_skips_network(mock_archive, tmp_cache):
     c = _make(mock_archive, tmp_cache)
     c.load_day("2026-04-18", "txs")
-    n = respx.calls.call_count
 
     c2 = _make(mock_archive, tmp_cache)
     c2.load_day("2026-04-18", "txs")

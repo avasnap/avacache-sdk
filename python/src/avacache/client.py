@@ -10,7 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Iterator, Literal
+from typing import Iterator
 from urllib.parse import urlparse
 
 import httpx
@@ -18,7 +18,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from avacache.hex import decode_hex_columns
-from avacache.manifest import Manifest
+from avacache.manifest import Kind, Manifest
 
 
 def _maybe_pbar(total: int, enabled: bool | None, desc: str):
@@ -47,7 +47,6 @@ def _maybe_pbar(total: int, enabled: bool | None, desc: str):
             def close(self) -> None: ...
         return _Noop()
 
-Kind = Literal["blocks", "txs", "events"]
 _VALID_KINDS = ("blocks", "txs", "events")
 
 
@@ -418,25 +417,6 @@ class Client:
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
-
-    def prune_cache(self, max_gb: float = 50.0) -> int:
-        """Delete least-recently-accessed cache files beyond `max_gb`."""
-        root = self.cache_dir
-        if not root.exists():
-            return 0
-        files = [p for p in root.rglob("*.parquet") if p.is_file()]
-        files.sort(key=lambda p: p.stat().st_atime)
-        total = sum(p.stat().st_size for p in files)
-        budget = int(max_gb * 1_073_741_824)
-        removed = 0
-        for p in files:
-            if total <= budget:
-                break
-            sz = p.stat().st_size
-            p.unlink()
-            total -= sz
-            removed += 1
-        return removed
 
     # ---- Housekeeping ----------------------------------------------------
 

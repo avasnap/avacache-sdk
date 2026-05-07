@@ -1,7 +1,7 @@
 """avacache — Python client for the public Avalanche C-Chain parquet archive."""
 
-from avacache.client import Client, Kind
-from avacache.manifest import Manifest, FileEntry
+from avacache.client import Client
+from avacache.manifest import FileEntry, Kind, Manifest
 
 
 def __getattr__(name: str):

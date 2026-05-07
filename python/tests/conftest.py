@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 from pathlib import Path
 
 import pyarrow as pa
@@ -92,7 +91,6 @@ def manifest_dict(archive_bytes) -> dict:
 @pytest.fixture
 def mock_archive(respx_mock, archive_bytes, manifest_dict):
     """Wire respx routes for manifest + every daily parquet."""
-    import respx
     from httpx import Response
 
     base = "https://cache.example.test"
