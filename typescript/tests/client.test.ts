@@ -14,7 +14,7 @@ import { Client } from '../src/client.js';
  * bytes each) and a matching manifest.
  */
 
-const REPO_CACHE = '/ssd/aidev/cache/43114';
+const REPO_CACHE = '/ssd/aidev/avacache-pipeline/43114';
 const DATE = '2020-09-24';
 
 async function loadBytes(kind: string): Promise<Uint8Array> {

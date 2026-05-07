@@ -18,7 +18,7 @@ const sample = {
       kind: 'txs',
       key: 'daily/2026-04-17.txs.parquet',
       size: 1,
-      md5: 'a',
+      md5: 'a'.repeat(32),
       schema_version: 'v2',
     },
     {
@@ -26,7 +26,7 @@ const sample = {
       kind: 'txs',
       key: 'daily/2026-04-18.txs.parquet',
       size: 2,
-      md5: 'b',
+      md5: 'b'.repeat(32),
       schema_version: 'v2',
     },
   ],
@@ -47,7 +47,7 @@ describe('manifest', () => {
 
   it('looks up a specific entry', () => {
     const m = ManifestSchema.parse(sample);
-    expect(manifestEntry(m, '2026-04-18', 'txs')?.md5).toBe('b');
+    expect(manifestEntry(m, '2026-04-18', 'txs')?.md5).toBe('b'.repeat(32));
     expect(manifestEntry(m, '1999-01-01', 'txs')).toBeUndefined();
   });
 

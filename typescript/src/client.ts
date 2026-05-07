@@ -20,6 +20,8 @@ import {
 export const DEFAULT_BASE_URL = 'https://parquet.avacache.com';
 export const DEFAULT_CHAIN_ID = 43114;
 const MANIFEST_TTL_MS = 5 * 60 * 1000;
+const MANIFEST_MAX_BYTES = 16 * 1024 * 1024; // 16 MiB cap on manifest body
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 
 export interface ClientOptions {
   chainId?: number;
@@ -29,6 +31,8 @@ export interface ClientOptions {
   /** Decode hex numeric columns to bigint/number (default: true). */
   decodeHex?: boolean;
   fetch?: typeof fetch;
+  /** Per-request timeout in ms. Default 60000. */
+  timeoutMs?: number;
 }
 
 export interface LoadOptions {
@@ -47,21 +51,90 @@ function md5Hex(bytes: Uint8Array): Promise<string> {
   return Promise.resolve('');
 }
 
+function validateBaseUrl(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`AVACACHE base URL is not a valid URL: ${url}`);
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error(
+      `AVACACHE base URL must be http(s), got ${parsed.protocol} in ${url}`,
+    );
+  }
+  return url;
+}
+
+/** Read a Response body to a Uint8Array, aborting if `maxBytes` is exceeded. */
+async function readBodyCapped(
+  resp: Response,
+  maxBytes: number,
+  context: string,
+): Promise<Uint8Array> {
+  const body = resp.body;
+  if (!body) {
+    // No streaming reader available — fall back to arrayBuffer with a
+    // post-hoc check. Better than nothing.
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    if (buf.byteLength > maxBytes) {
+      throw new Error(
+        `${context}: body of ${buf.byteLength} bytes exceeds cap of ${maxBytes}`,
+      );
+    }
+    return buf;
+  }
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new Error(
+        `${context}: response exceeded cap of ${maxBytes} bytes`,
+      );
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.byteLength;
+  }
+  return out;
+}
+
 export class Client {
   readonly chainId: number;
   readonly baseUrl: string;
   readonly decodeHex: boolean;
-  private readonly fetchFn: typeof fetch;
+  readonly timeoutMs: number;
+  private readonly fetchOverride: typeof fetch | undefined;
   private readonly cachePromise: Promise<Cache>;
 
   private _manifest: Manifest | null = null;
   private _manifestAt = 0;
+  // md5s already verified on disk this process — avoids re-hashing on every
+  // loadDay call within a long-lived Client.
+  private readonly _verified = new Set<string>();
 
   constructor(opts: ClientOptions = {}) {
     this.chainId = opts.chainId ?? DEFAULT_CHAIN_ID;
-    this.baseUrl = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
+    const envBase =
+      typeof process !== 'undefined' && process.env
+        ? process.env.AVACACHE_BASE_URL
+        : undefined;
+    const rawBase = (opts.baseUrl ?? envBase ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
+    this.baseUrl = validateBaseUrl(rawBase);
     this.decodeHex = opts.decodeHex ?? true;
-    this.fetchFn = opts.fetch ?? globalThis.fetch.bind(globalThis);
+    this.timeoutMs = opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    // Don't bind globalThis.fetch eagerly — that crashes Node <18 even when
+    // the caller is about to inject opts.fetch. Resolve lazily in fetch().
+    this.fetchOverride = opts.fetch;
 
     if (opts.cache === false) {
       this.cachePromise = Promise.resolve(new NoopCache());
@@ -73,6 +146,32 @@ export class Client {
       this.cachePromise = Promise.resolve(makeIndexedDbCache(this.chainId));
     } else {
       this.cachePromise = Promise.resolve(new NoopCache());
+    }
+  }
+
+  private async fetch(url: string, context: string): Promise<Response> {
+    const fetchFn = this.fetchOverride ?? globalThis.fetch;
+    if (!fetchFn) {
+      throw new Error(
+        'no fetch available — pass opts.fetch or run on Node 18+ / a browser',
+      );
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const resp = await fetchFn(url, {
+        // 'error' rejects the promise on any 3xx — the archive is a flat
+        // bucket, so a redirect means the origin is misconfigured or
+        // compromised.
+        redirect: 'error',
+        signal: controller.signal,
+      });
+      if (!resp.ok) {
+        throw new Error(`${context}: ${resp.status} ${resp.statusText}`);
+      }
+      return resp;
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -93,12 +192,21 @@ export class Client {
     if (!force && this._manifest && now - this._manifestAt < MANIFEST_TTL_MS) {
       return this._manifest;
     }
-    const resp = await this.fetchFn(this.manifestUrl());
-    if (!resp.ok) {
-      throw new Error(`manifest fetch ${resp.status} ${resp.statusText}`);
+    const resp = await this.fetch(this.manifestUrl(), 'manifest fetch');
+    const bytes = await readBodyCapped(
+      resp,
+      MANIFEST_MAX_BYTES,
+      'manifest fetch',
+    );
+    const raw = JSON.parse(new TextDecoder().decode(bytes));
+    const manifest = ManifestSchema.parse(raw);
+    if (manifest.chain_id !== this.chainId) {
+      throw new Error(
+        `manifest chain_id ${manifest.chain_id} does not match ` +
+          `configured chain_id ${this.chainId}`,
+      );
     }
-    const raw = await resp.json();
-    this._manifest = ManifestSchema.parse(raw);
+    this._manifest = manifest;
     this._manifestAt = now;
     return this._manifest;
   }
@@ -162,15 +270,30 @@ export class Client {
     const cacheKey = `${entry.key}|${entry.md5}`;
 
     const cached = await cache.get(cacheKey);
-    if (cached && cached.byteLength === entry.size) return cached;
-
-    const resp = await this.fetchFn(`${this.baseUrl}/${entry.key}`);
-    if (!resp.ok) {
-      throw new Error(
-        `parquet fetch ${resp.status} ${resp.statusText} for ${entry.key}`,
-      );
+    if (cached && cached.byteLength === entry.size) {
+      // Cache hit: re-verify md5 once per process (Node only — browsers have
+      // no md5 in WebCrypto, documented intentional behavior).
+      if (this._verified.has(entry.md5)) return cached;
+      const cachedMd5 = await md5Hex(cached);
+      if (!cachedMd5 || cachedMd5 === entry.md5) {
+        // Either Node verified, or browser path (md5 unavailable, size-only).
+        this._verified.add(entry.md5);
+        return cached;
+      }
+      // Node and md5 mismatched — fall through to re-download.
     }
-    const bytes = new Uint8Array(await resp.arrayBuffer());
+
+    const resp = await this.fetch(
+      `${this.baseUrl}/${entry.key}`,
+      `parquet fetch for ${entry.key}`,
+    );
+    // Cap the body at exactly entry.size + 1 byte: if the origin streams more
+    // than entry.size, abort — a hostile or broken origin can't OOM us.
+    const bytes = await readBodyCapped(
+      resp,
+      entry.size + 1,
+      `parquet fetch for ${entry.key}`,
+    );
 
     if (bytes.byteLength !== entry.size) {
       throw new Error(
@@ -185,6 +308,7 @@ export class Client {
     }
 
     await cache.put(cacheKey, bytes);
+    this._verified.add(entry.md5);
     return bytes;
   }
 }

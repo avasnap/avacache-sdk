@@ -3,20 +3,28 @@ import { z } from 'zod';
 export const KindSchema = z.enum(['blocks', 'txs', 'events']);
 export type Kind = z.infer<typeof KindSchema>;
 
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const MD5_RE = /^[a-f0-9]{32}$/;
+const FILE_KEY_RE = /^daily\/\d{4}-\d{2}-\d{2}\.(blocks|txs|events)\.parquet$/;
+const LOOKUP_KEY_RE = /^lookups\/[A-Za-z0-9_-]+\.(json|json\.gz|parquet)$/;
+
+const dateString = z.string().regex(DATE_RE, 'expected YYYY-MM-DD');
+const md5String = z.string().regex(MD5_RE, 'expected 32 lowercase hex chars');
+
 export const FileEntrySchema = z.object({
-  date: z.string(),
+  date: dateString,
   kind: KindSchema,
-  key: z.string(),
+  key: z.string().regex(FILE_KEY_RE, 'unsafe FileEntry key'),
   size: z.number().int().nonnegative(),
-  md5: z.string(),
+  md5: md5String,
   schema_version: z.string(),
 });
 export type FileEntry = z.infer<typeof FileEntrySchema>;
 
 export const LookupEntrySchema = z.object({
-  key: z.string(),
+  key: z.string().regex(LOOKUP_KEY_RE, 'unsafe LookupEntry key'),
   size: z.number().int().nonnegative(),
-  md5: z.string(),
+  md5: md5String,
 });
 export type LookupEntry = z.infer<typeof LookupEntrySchema>;
 

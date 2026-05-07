@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import os
+import secrets
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Iterator, Literal
+from urllib.parse import urlparse
 
 import httpx
 import pyarrow as pa
@@ -51,6 +52,7 @@ Kind = Literal["blocks", "txs", "events"]
 DEFAULT_BASE_URL = "https://parquet.avacache.com"
 DEFAULT_CHAIN_ID = 43114
 MANIFEST_TTL_SEC = 300
+MANIFEST_MAX_BYTES = 16 * 1024 * 1024  # 16 MiB cap for manifest body
 
 
 def _parse_date(d: str | date) -> date:
@@ -66,6 +68,38 @@ def _cache_root() -> Path:
 
 def _offline_default() -> bool:
     return os.environ.get("AVACACHE_OFFLINE", "").lower() in ("1", "true", "yes")
+
+
+def _validate_base_url(url: str) -> str:
+    """Reject base URLs that aren't http(s). file://, gopher://, etc. are out."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            f"AVACACHE base_url must be http(s), got scheme {parsed.scheme!r} in {url!r}"
+        )
+    if not parsed.netloc:
+        raise ValueError(f"AVACACHE base_url is missing host: {url!r}")
+    return url
+
+
+def _md5_file(path: Path, chunk_size: int = 1 << 20) -> str:
+    """Stream-hash a file with md5. One read pass, OS page cache-friendly."""
+    h = hashlib.md5()
+    with path.open("rb") as f:
+        while chunk := f.read(chunk_size):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text via tmp+rename so a crash mid-write can't corrupt the target."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}-{secrets.token_hex(4)}.tmp")
+    try:
+        tmp.write_text(text)
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 class Client:
@@ -87,18 +121,25 @@ class Client:
         decode_hex: bool = True,
     ):
         self.chain_id = chain_id
-        self.base_url = (
+        raw_base = (
             base_url
             or os.environ.get("AVACACHE_BASE_URL")
             or DEFAULT_BASE_URL
         ).rstrip("/")
+        self.base_url = _validate_base_url(raw_base)
         self.cache_dir = Path(cache_dir) if cache_dir else _cache_root()
         self.offline = offline if offline is not None else _offline_default()
         self.decode_hex = decode_hex
 
-        self._http = httpx.Client(timeout=timeout, http2=False, follow_redirects=True)
+        # follow_redirects=False: the archive is a flat bucket, redirects would
+        # mean the origin is misconfigured or compromised. http2 is off because
+        # h2 isn't a declared dep.
+        self._http = httpx.Client(timeout=timeout, http2=False, follow_redirects=False)
         self._manifest: Manifest | None = None
         self._manifest_at: float = 0.0
+        # md5s already verified on disk this process — avoids re-hashing on
+        # every load_day call within a long-lived Client.
+        self._verified: set[str] = set()
 
     # ---- URLs -------------------------------------------------------------
 
@@ -131,15 +172,37 @@ class Client:
                 )
             data = json.loads(cache_path.read_text())
         else:
-            resp = self._http.get(self.manifest_url())
-            resp.raise_for_status()
-            data = resp.json()
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(json.dumps(data))
+            data = self._fetch_manifest_json()
+            _atomic_write_text(cache_path, json.dumps(data))
 
-        self._manifest = Manifest.model_validate(data)
+        manifest = Manifest.model_validate(data)
+        if manifest.chain_id != self.chain_id:
+            raise ValueError(
+                f"manifest chain_id {manifest.chain_id} does not match "
+                f"configured chain_id {self.chain_id}"
+            )
+        self._manifest = manifest
         self._manifest_at = now
         return self._manifest
+
+    def _fetch_manifest_json(self) -> dict:
+        """Stream the manifest with a hard size cap to prevent OOM."""
+        with self._http.stream("GET", self.manifest_url()) as resp:
+            if resp.status_code != 200:
+                raise httpx.HTTPStatusError(
+                    f"manifest fetch returned {resp.status_code}",
+                    request=resp.request,
+                    response=resp,
+                )
+            body = bytearray()
+            for chunk in resp.iter_bytes(chunk_size=64 << 10):
+                body += chunk
+                if len(body) > MANIFEST_MAX_BYTES:
+                    raise ValueError(
+                        f"manifest body exceeds {MANIFEST_MAX_BYTES} bytes — "
+                        "refusing to buffer further"
+                    )
+        return json.loads(bytes(body))
 
     def available_dates(self, kind: Kind) -> list[date]:
         return self.manifest().dates(kind)
@@ -255,9 +318,25 @@ class Client:
         )
 
     def _fetch_to_cache(self, key: str, md5: str, size: int) -> Path:
+        # key was validated by FileEntry / LookupEntry pydantic models.
         path = self._object_cache_path(key, md5)
+        # Defense in depth: the resolved cache path must stay within
+        # cache_dir/<chain_id>/. With key already regex-validated this is
+        # belt-and-braces, but cheap.
+        chain_root = (self.cache_dir / str(self.chain_id)).resolve()
+        if chain_root != path.resolve().parents[0] and chain_root not in path.resolve().parents:
+            raise ValueError(f"resolved cache path escapes chain root: {path}")
+
         if path.exists() and path.stat().st_size == size:
-            return path
+            # Cache hit: re-verify md5 once per process, then trust.
+            # The md5-suffixed filename means a stale file is unlikely, but
+            # truncation, partial writes from another process, or fs
+            # corruption can still leave a same-size-different-bytes file.
+            if md5 in self._verified or _md5_file(path) == md5:
+                self._verified.add(md5)
+                return path
+            # Mismatch: drop and re-download.
+            path.unlink(missing_ok=True)
 
         if self.offline:
             raise RuntimeError(
@@ -265,26 +344,66 @@ class Client:
             )
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
+        tmp = path.with_name(
+            f"{path.name}.{os.getpid()}-{secrets.token_hex(4)}.tmp"
+        )
+
+        # O_EXCL prevents two writers from racing on the same tmp; O_NOFOLLOW
+        # neutralizes a pre-placed symlink in a shared cache dir. The random
+        # suffix makes collisions effectively impossible.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
 
         url = f"{self.base_url}/{key}"
-        with self._http.stream("GET", url) as resp:
-            resp.raise_for_status()
-            hasher = hashlib.md5()
-            with tmp.open("wb") as f:
-                for chunk in resp.iter_bytes(chunk_size=1 << 20):
-                    hasher.update(chunk)
-                    f.write(chunk)
+        try:
+            with self._http.stream("GET", url) as resp:
+                if resp.status_code != 200:
+                    raise httpx.HTTPStatusError(
+                        f"object fetch returned {resp.status_code} for {key}",
+                        request=resp.request,
+                        response=resp,
+                    )
+                hasher = hashlib.md5()
+                running = 0
+                fd = os.open(tmp, flags, 0o600)
+                try:
+                    with os.fdopen(fd, "wb") as f:
+                        for chunk in resp.iter_bytes(chunk_size=1 << 20):
+                            running += len(chunk)
+                            if running > size:
+                                raise ValueError(
+                                    f"oversized download for {key}: "
+                                    f"received >{size} bytes, manifest declared {size}"
+                                )
+                            hasher.update(chunk)
+                            f.write(chunk)
+                finally:
+                    # If os.fdopen raised before consuming fd, close it.
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
 
-        got = hasher.hexdigest()
-        if got != md5:
+            if running != size:
+                raise ValueError(
+                    f"size mismatch for {key}: got {running} bytes, "
+                    f"expected {size}"
+                )
+            got = hasher.hexdigest()
+            if got != md5:
+                raise ValueError(
+                    f"MD5 mismatch downloading {key}: "
+                    f"expected {md5}, got {got}"
+                )
+            tmp.replace(path)
+            self._verified.add(md5)
+            return path
+        except BaseException:
             tmp.unlink(missing_ok=True)
-            raise ValueError(
-                f"MD5 mismatch downloading {key}: "
-                f"expected {md5}, got {got}"
-            )
-        tmp.replace(path)
-        return path
+            raise
 
     def prune_cache(self, max_gb: float = 50.0) -> int:
         """Delete least-recently-accessed cache files beyond `max_gb`."""
