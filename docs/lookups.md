@@ -52,16 +52,35 @@ Practical rules:
 
 ## JSON Shapes
 
+Both lookup files have the **same shape**: each key maps to a **list of
+candidate signatures**, ordered by observed frequency on chain. The list form
+is uniform across both files even though collisions behave differently in
+practice (4-byte selectors collide frequently; full topic0 hashes collide
+rarely).
+
+Each candidate has:
+
+| Field | Meaning |
+|---|---|
+| `signature` | Canonical signature string, e.g. `transfer(address,uint256)`. |
+| `count` | Number of times this candidate was observed in the archive. Use to pick the dominant interpretation. |
+| `abi` | A single ABI fragment object (not a list) describing the function or event. |
+
+To resolve a key to a single signature, **sort by `count` descending and take
+the first entry**. If you need a stable choice without sorting, the published
+files are already ordered by `count` desc, so `[0]` is the canonical pick.
+
 ### `lookups/function_selectors.json`
 
 Shape:
 
 ```json
 {
-  "0xa9059cbb": {
-    "signature": "transfer(address,uint256)",
-    "abi": [
-      {
+  "0xa9059cbb": [
+    {
+      "signature": "transfer(address,uint256)",
+      "count": 12345678,
+      "abi": {
         "type": "function",
         "name": "transfer",
         "inputs": [
@@ -69,8 +88,8 @@ Shape:
           {"name": "value", "type": "uint256"}
         ]
       }
-    ]
-  }
+    }
+  ]
 }
 ```
 
@@ -80,6 +99,9 @@ Notes:
 - these keys are designed to match `txs.input_prefix`
 - `txs.input_prefix` may be an empty string for value-only transfers; that will
   not resolve through the lookup
+- 4-byte selectors collide often: a single key may carry many candidates with
+  very different semantics. Pick by `count`, or surface the full list if your
+  use case needs disambiguation
 
 ### `lookups/event_topics.json`
 
@@ -87,10 +109,11 @@ Shape:
 
 ```json
 {
-  "0xddf252ad...": {
-    "signature": "Transfer(address,address,uint256)",
-    "abi": [
-      {
+  "0xddf252ad...": [
+    {
+      "signature": "Transfer(address,address,uint256)",
+      "count": 9876543,
+      "abi": {
         "type": "event",
         "name": "Transfer",
         "anonymous": false,
@@ -100,8 +123,8 @@ Shape:
           {"name": "value", "type": "uint256", "indexed": false}
         ]
       }
-    ]
-  }
+    }
+  ]
 }
 ```
 
@@ -109,6 +132,8 @@ Notes:
 
 - keys are lowercase `0x`-prefixed `topic0` hashes
 - these keys are designed to match `events.topic0`
+- topic0 collisions are rare in practice, so the candidate list is usually a
+  single entry — but the shape is still a list, so always index with `[0]`
 - missing keys are normal; not every selector or event hash is guaranteed to be
   present
 
@@ -179,18 +204,25 @@ if day is None:
 txs = client.load_day(day, "txs").to_pylist()
 events = client.load_day(day, "events").to_pylist()
 
+def best_candidate(candidates: list[dict] | None) -> dict | None:
+    if not candidates:
+        return None
+    # files are pre-sorted by `count` desc, but sort defensively
+    return max(candidates, key=lambda c: c.get("count", 0))
+
+
 for row in txs[:5]:
     selector = row["input_prefix"]
     if not selector:
         print("tx", row["tx_hash"], "has no selector")
         continue
-    match = selector_lookup.get(selector)
+    match = best_candidate(selector_lookup.get(selector))
     signature = match["signature"] if match else None
     print("tx", row["tx_hash"], selector, signature)
 
 for row in events[:5]:
     topic0 = row["topic0"]
-    match = topic_lookup.get(topic0)
+    match = best_candidate(topic_lookup.get(topic0))
     signature = match["signature"] if match else None
     print("event", row["tx_hash"], topic0, signature)
 ```
@@ -241,8 +273,16 @@ async function fetchLookup(
 
   return JSON.parse(body.toString('utf8')) as Record<
     string,
-    { signature: string; abi: object[] }
+    Array<{ signature: string; count: number; abi: object }>
   >;
+}
+
+function bestCandidate(
+  candidates: Array<{ signature: string; count: number }> | undefined,
+) {
+  if (!candidates || candidates.length === 0) return undefined;
+  // files are pre-sorted by `count` desc, so [0] is the canonical pick
+  return candidates[0];
 }
 
 const client = new Client();
@@ -256,17 +296,27 @@ const txs = await client.loadDay(day, 'txs');
 const events = await client.loadDay(day, 'events');
 
 for (const row of txs.slice(0, 5)) {
-  const selector = row.input_prefix;
+  const selector = row.input_prefix as string;
   if (!selector) {
     console.log('tx', row.tx_hash, 'has no selector');
     continue;
   }
-  console.log('tx', row.tx_hash, selector, selectorLookup[selector]?.signature);
+  console.log(
+    'tx',
+    row.tx_hash,
+    selector,
+    bestCandidate(selectorLookup[selector])?.signature,
+  );
 }
 
 for (const row of events.slice(0, 5)) {
-  const topic0 = row.topic0;
-  console.log('event', row.tx_hash, topic0, topicLookup[topic0]?.signature);
+  const topic0 = row.topic0 as string;
+  console.log(
+    'event',
+    row.tx_hash,
+    topic0,
+    bestCandidate(topicLookup[topic0])?.signature,
+  );
 }
 ```
 
