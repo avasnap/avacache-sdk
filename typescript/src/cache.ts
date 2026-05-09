@@ -64,7 +64,9 @@ export async function makeNodeFsCache(
     ) {
       throw new Error(`unsafe cache key: ${JSON.stringify(key)}`);
     }
-    const escaped = key.replace(/\//g, '__');
+    // `/` → `__` for nesting; `|` → `--` because Windows (NTFS) reserves `|`
+    // and rejects file creation with ENOENT when it appears in a path.
+    const escaped = key.replace(/\//g, '__').replace(/\|/g, '--');
     const final = path.resolve(dir, escaped);
     if (final !== dirResolved && !final.startsWith(dirResolved + path.sep)) {
       throw new Error(`cache key escapes root: ${JSON.stringify(key)}`);
