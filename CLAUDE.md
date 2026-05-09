@@ -49,7 +49,7 @@ Both SDKs implement the same three-layer pipeline. When editing either, mirror t
 
 ### Cache layout
 
-Both clients cache under `~/.cache/avacache/v1/<chain_id>/` by default; override via `AVACACHE_CACHE_DIR`. Python files are keyed `daily/<date>.<kind>.<md5[:16]>.parquet` so stale files are never read — if the manifest md5 changes, the cache hash in the filename also changes and a re-download is forced. The TS Node cache uses the full `entry.key|entry.md5` as the filename after `/`→`__` escaping for the same reason. The browser cache uses IndexedDB (`avacache-v1-<chain_id>`).
+Both clients cache under `~/.cache/avacache/v1/<chain_id>/` by default; override via `AVACACHE_CACHE_DIR`. Python files are keyed `daily/<date>.<kind>.<md5[:16]>.parquet` so stale files are never read — if the manifest md5 changes, the cache hash in the filename also changes and a re-download is forced. The TS Node cache uses `entry.key|entry.md5` as the cache-adapter key for the same reason; on disk that's escaped `/` → `__` and `|` → `--` (e.g. `daily__2026-04-18.txs.parquet--<md5>`) because both characters are reserved on Windows NTFS. The browser cache uses IndexedDB (`avacache-v1-<chain_id>`).
 
 ### DuckDB helpers
 
