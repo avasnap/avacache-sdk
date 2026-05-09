@@ -184,14 +184,17 @@ async function fetchLookupKey(
   // Route through the client's safeguarded fetch so the CLI inherits the
   // same redirect rejection, request timeout, and non-2xx error handling
   // that the rest of the SDK applies to manifest/parquet downloads.
-  const resp = await client.safeFetch(
+  const { response, dispose } = await client.safeFetch(
     `${client.baseUrl}/${entry.key}`,
     `lookup fetch for ${name}`,
   );
-  if (!resp.body) throw new Error(`lookup fetch for ${name} returned no body`);
+  if (!response.body) {
+    dispose();
+    throw new Error(`lookup fetch for ${name} returned no body`);
+  }
 
   const target = `"${key.toLowerCase()}":`;
-  const reader = resp.body.getReader();
+  const reader = response.body.getReader();
   const hasher = createHash('md5');
   const decoder = new TextDecoder('utf-8');
 
@@ -225,36 +228,42 @@ async function fetchLookupKey(
     return false;
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    totalBytes += value.byteLength;
-    hasher.update(value);
-    const chunkText = decoder.decode(value, { stream: true });
+  // Hold the timeout across the entire body read; the timer covers stalls
+  // in the streaming body, not just time-to-headers. dispose() always runs.
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      hasher.update(value);
+      const chunkText = decoder.decode(value, { stream: true });
 
-    if (capturing) {
-      if (consumeForCapture(chunkText)) break;
-      continue;
+      if (capturing) {
+        if (consumeForCapture(chunkText)) break;
+        continue;
+      }
+
+      textWindow += chunkText;
+      foundIdx = textWindow.indexOf(target);
+      if (foundIdx !== -1) {
+        const after = textWindow.slice(foundIdx + target.length);
+        capturing = true;
+        if (consumeForCapture(after)) break;
+      } else if (textWindow.length > overlapBytes) {
+        // Keep only the trailing overlap so a key spanning two chunks still resolves.
+        textWindow = textWindow.slice(textWindow.length - overlapBytes);
+      }
     }
 
-    textWindow += chunkText;
-    foundIdx = textWindow.indexOf(target);
-    if (foundIdx !== -1) {
-      const after = textWindow.slice(foundIdx + target.length);
-      capturing = true;
-      if (consumeForCapture(after)) break;
-    } else if (textWindow.length > overlapBytes) {
-      // Keep only the trailing overlap so a key spanning two chunks still resolves.
-      textWindow = textWindow.slice(textWindow.length - overlapBytes);
+    // Drain remaining bytes so size + md5 are checked even after a match.
+    while (capturing) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      hasher.update(value);
     }
-  }
-
-  // Drain remaining bytes so size + md5 are checked even after a match.
-  while (capturing) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    totalBytes += value.byteLength;
-    hasher.update(value);
+  } finally {
+    dispose();
   }
 
   if (totalBytes !== entry.size) {
@@ -347,43 +356,52 @@ async function cmdFetch(client: Client, args: Args): Promise<number> {
   // Route through `client.safeFetch` so the CLI inherits redirect
   // rejection, request timeout, and non-2xx error handling — the same
   // safeguards `loadDay` applies to its own parquet downloads.
-  const resp = await client.safeFetch(
+  const { response, dispose } = await client.safeFetch(
     `${client.baseUrl}/${entry.key}`,
     `parquet fetch for ${entry.key}`,
   );
-  if (!resp.body) throw new Error(`parquet fetch for ${entry.key} returned no body`);
-
-  const tmp = `${out}.${process.pid}-${randomBytes(4).toString('hex')}.tmp`;
-  const handle = await fsOpen(tmp, 'wx', 0o600);
-  const hasher = createHash('md5');
-  let written = 0;
+  // Single outer try guarantees `dispose()` runs even if the local file
+  // handle can't be opened (e.g. --out points to an unwritable directory).
+  // Without this, an early fsOpen failure would leak the watchdog timer
+  // until it fired.
   try {
-    const reader = resp.body.getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      written += value.byteLength;
-      if (written > entry.size) {
-        throw new Error(
-          `oversized download for ${entry.key}: received >${entry.size} bytes`,
-        );
+    if (!response.body) {
+      throw new Error(`parquet fetch for ${entry.key} returned no body`);
+    }
+    const tmp = `${out}.${process.pid}-${randomBytes(4).toString('hex')}.tmp`;
+    const handle = await fsOpen(tmp, 'wx', 0o600);
+    const hasher = createHash('md5');
+    let written = 0;
+    try {
+      const reader = response.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        written += value.byteLength;
+        if (written > entry.size) {
+          throw new Error(
+            `oversized download for ${entry.key}: received >${entry.size} bytes`,
+          );
+        }
+        hasher.update(value);
+        await handle.write(value);
       }
-      hasher.update(value);
-      await handle.write(value);
+      await handle.close();
+      if (written !== entry.size) {
+        throw new Error(`size mismatch: got ${written}, expected ${entry.size}`);
+      }
+      const digest = hasher.digest('hex');
+      if (digest !== entry.md5) {
+        throw new Error(`md5 mismatch: got ${digest}, expected ${entry.md5}`);
+      }
+      await rename(tmp, out);
+    } catch (err) {
+      await handle.close().catch(() => {});
+      await unlink(tmp).catch(() => {});
+      throw err;
     }
-    await handle.close();
-    if (written !== entry.size) {
-      throw new Error(`size mismatch: got ${written}, expected ${entry.size}`);
-    }
-    const digest = hasher.digest('hex');
-    if (digest !== entry.md5) {
-      throw new Error(`md5 mismatch: got ${digest}, expected ${entry.md5}`);
-    }
-    await rename(tmp, out);
-  } catch (err) {
-    await handle.close().catch(() => {});
-    await unlink(tmp).catch(() => {});
-    throw err;
+  } finally {
+    dispose();
   }
   process.stdout.write(out + '\n');
   return 0;

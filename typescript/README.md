@@ -89,6 +89,8 @@ Important options:
 - `decodeHex`: decode known numeric hex columns on load
 - `cache`: custom cache adapter, or `false` to disable caching
 - `fetch`: custom fetch implementation for SSR, testing, or nonstandard runtimes
+- `offline`: refuse network and serve only from cache. Also configurable via
+  `AVACACHE_OFFLINE=1`
 
 Useful methods:
 
@@ -98,6 +100,15 @@ Useful methods:
 - `urlFor(date, kind)`
 - `loadDay(date, kind, opts?)`
 - `loadRange(start, end, kind, opts?)`
+- `iterRange(start, end, kind, opts?)` — yields `[date, Row[]]` per day with
+  bounded byte prefetch. Memory ceiling is `concurrency × parquet_bytes` plus
+  one decoded day.
+- `iterRows(date, kind, opts?)` — yields one decoded row at a time by walking
+  parquet row groups. Use when even a single day's `Row[]` won't fit in heap
+  (typical for full days of `events`). Pass `{ columns: [...] }` to project
+  only the fields you need.
+- `iterRowsRange(start, end, kind, opts?)` — composes the two: per-row
+  streaming across a date range with bounded byte prefetch.
 
 Range semantics:
 
@@ -265,9 +276,12 @@ does not force `@duckdb/duckdb-wasm` into every bundle.
 
 ## Notes And Limits
 
-- `loadRange()` currently loads days serially and returns one large in-memory
-  array.
+- `loadRange()` concatenates every day into one in-memory array. For multi-month
+  spans of `txs` or `events`, prefer `iterRange()` (day-at-a-time) or
+  `iterRowsRange()` (row-at-a-time, with optional column projection).
 - The SDK focuses on daily parquet objects; if you need `manifest.lookups`,
   read the manifest and fetch those JSON objects directly.
 - `urlFor()` is a simple path builder. Use `manifest()` first if you need to
   validate that a date exists before handing the URL to another tool.
+- Set `AVACACHE_OFFLINE=1` (or `new Client({ offline: true })`) to refuse network
+  access and serve only from the local cache.

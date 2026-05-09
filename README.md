@@ -133,8 +133,11 @@ The Python SDK also supports strict offline mode with `AVACACHE_OFFLINE=1`.
 - Use `load_day` / `loadDay` for a single UTC date.
 - Use `load_range` / `loadRange` for small to moderate spans you really want in
   one in-memory result.
-- Use Python `iter_range()` for large spans; it yields one decoded day at a time
-  and prefetches ahead.
+- Use `iter_range()` (Python) or `iterRange()` (TypeScript) for large spans; both
+  yield one day at a time with bounded prefetch.
+- Use TypeScript `iterRows()` / `iterRowsRange()` when even one day's `Row[]`
+  is too large to hold (typical for `events`); these walk parquet row groups
+  and support column projection via `{ columns: [...] }`.
 - Use Python `prune_cache()` to trim old cached parquet files when local disk
   usage matters.
 - Use `url_for()` / `urlFor()` if another engine will read the parquet for you.

@@ -3,6 +3,8 @@ export type {
   ClientOptions,
   LoadOptions,
   IterRangeOptions,
+  IterRowsOptions,
+  IterRowsRangeOptions,
 } from './client.js';
 export type {
   FileEntry,
