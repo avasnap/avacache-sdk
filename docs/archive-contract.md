@@ -154,8 +154,29 @@ The archive also serves static JSON lookups under `/lookups/`.
 
 | Lookup | Key | Purpose |
 |---|---|---|
-| Function selectors | `lookups/function_selectors.json` | Maps 4-byte selectors to signatures and ABI fragments. |
-| Event topics | `lookups/event_topics.json` | Maps `topic0` hashes to signatures and ABI fragments. |
+| Function selectors | `lookups/function_selectors.json` | Maps 4-byte selectors to candidate signatures and ABI fragments. |
+| Event topics | `lookups/event_topics.json` | Maps `topic0` hashes to candidate signatures and ABI fragments. |
+
+Both files share the same JSON shape: each key maps to a **list of candidate
+entries** of the form `{ "signature": str, "count": int, "abi": object }`,
+ordered by observed `count` descending. To resolve a key to a single
+signature, take `[0]` (or sort by `count` descending defensively).
+
+```json
+{
+  "0xa9059cbb": [
+    {
+      "signature": "transfer(address,uint256)",
+      "count": 12345678,
+      "abi": { "type": "function", "name": "transfer", "inputs": [/*...*/] }
+    }
+  ]
+}
+```
+
+4-byte selectors collide frequently, so a single key may carry many
+candidates. `topic0` collisions are rare in practice, so the list is usually a
+single entry — but the shape is uniform across both files.
 
 How they relate to parquet fields:
 
@@ -167,7 +188,9 @@ Typical usage:
 1. Read `manifest.lookups`.
 2. Fetch the JSON file at the published `key`.
 3. Verify size and MD5 if you are managing your own cache.
-4. Use `txs.input_prefix` or `events.topic0` as the lookup key.
+4. Use `txs.input_prefix` or `events.topic0` as the lookup key, then pick the
+   highest-`count` candidate (or surface the full list when disambiguation
+   matters).
 
 The SDKs expose lookup metadata via the manifest model, but they do not
 currently provide first-class helper methods for downloading or decoding those

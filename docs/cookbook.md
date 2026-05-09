@@ -58,17 +58,21 @@ with Client() as c:
     sample_tx = txs.slice(0, 1).to_pylist()[0]
     sample_event = events.slice(0, 1).to_pylist()[0]
 
+    def best_signature(candidates):
+        # lookup files are pre-sorted by `count` desc; [0] is the canonical pick
+        return candidates[0]["signature"] if candidates else None
+
     print(latest)
     print(blocks.num_rows, txs.num_rows, events.num_rows)
     print(
         "tx selector:",
         sample_tx["input_prefix"],
-        selector_lookup.get(sample_tx["input_prefix"], {}).get("signature"),
+        best_signature(selector_lookup.get(sample_tx["input_prefix"])),
     )
     print(
         "event topic0:",
         sample_event["topic0"],
-        topic_lookup.get(sample_event["topic0"], {}).get("signature"),
+        best_signature(topic_lookup.get(sample_event["topic0"])),
     )
 ```
 
@@ -100,17 +104,18 @@ const [blocks, txs, events, selectorLookup, topicLookup] = await Promise.all([
 const sampleTx = txs[0];
 const sampleEvent = events[0];
 
+// lookup values are arrays of candidates pre-sorted by `count` desc;
+// [0] is the canonical pick.
+const txCandidates = selectorLookup[sampleTx?.input_prefix as string] as
+  | Array<{ signature: string; count: number }>
+  | undefined;
+const eventCandidates = topicLookup[sampleEvent?.topic0 as string] as
+  | Array<{ signature: string; count: number }>
+  | undefined;
+
 console.log(latest, blocks.length, txs.length, events.length);
-console.log(
-  'tx selector:',
-  sampleTx?.input_prefix,
-  selectorLookup[sampleTx?.input_prefix as string]?.signature,
-);
-console.log(
-  'event topic0:',
-  sampleEvent?.topic0,
-  topicLookup[sampleEvent?.topic0 as string]?.signature,
-);
+console.log('tx selector:', sampleTx?.input_prefix, txCandidates?.[0]?.signature);
+console.log('event topic0:', sampleEvent?.topic0, eventCandidates?.[0]?.signature);
 ```
 
 Use this pattern when you want the freshest day that is known to be complete
