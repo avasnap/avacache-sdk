@@ -4,11 +4,29 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+
+
+SAMPLE_SELECTORS = {
+    "0xa9059cbb": [
+        {"signature": "transfer(address,uint256)", "count": 491287, "abi": {"name": "transfer"}},
+        {"signature": "transfer(bytes4,bytes32)", "count": 12, "abi": {"name": "transfer"}},
+    ],
+    "0x70a08231": [
+        {"signature": "balanceOf(address)", "count": 88000, "abi": {"name": "balanceOf"}},
+    ],
+}
+
+SAMPLE_TOPICS = {
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef": [
+        {"signature": "Transfer(address,address,uint256)", "count": 603616, "abi": {"name": "Transfer"}},
+    ],
+}
 
 
 def _build_parquet(kind: str) -> bytes:
@@ -62,7 +80,16 @@ def archive_bytes() -> dict[str, bytes]:
 
 
 @pytest.fixture
-def manifest_dict(archive_bytes) -> dict:
+def lookup_bodies() -> dict[str, bytes]:
+    """Canonical JSON bodies for the published lookup files."""
+    return {
+        "function_selectors": json.dumps(SAMPLE_SELECTORS).encode(),
+        "event_topics": json.dumps(SAMPLE_TOPICS).encode(),
+    }
+
+
+@pytest.fixture
+def manifest_dict(archive_bytes, lookup_bodies) -> dict:
     files = []
     for kind, body in archive_bytes.items():
         files.append({
@@ -73,6 +100,18 @@ def manifest_dict(archive_bytes) -> dict:
             "md5": hashlib.md5(body).hexdigest(),
             "schema_version": "v2",
         })
+    lookups = {
+        "function_selectors": {
+            "key": "lookups/function_selectors.json",
+            "size": len(lookup_bodies["function_selectors"]),
+            "md5": hashlib.md5(lookup_bodies["function_selectors"]).hexdigest(),
+        },
+        "event_topics": {
+            "key": "lookups/event_topics.json",
+            "size": len(lookup_bodies["event_topics"]),
+            "md5": hashlib.md5(lookup_bodies["event_topics"]).hexdigest(),
+        },
+    }
     return {
         "chain_id": 43114,
         "generated_at": "2026-04-19T00:00:00Z",
@@ -83,14 +122,14 @@ def manifest_dict(archive_bytes) -> dict:
             "txs":    ["block_number", "tx_hash"],
             "events": ["block_number", "tx_hash", "log_index"],
         },
-        "lookups": {},
+        "lookups": lookups,
         "files": files,
     }
 
 
 @pytest.fixture
-def mock_archive(respx_mock, archive_bytes, manifest_dict):
-    """Wire respx routes for manifest + every daily parquet."""
+def mock_archive(respx_mock, archive_bytes, manifest_dict, lookup_bodies):
+    """Wire respx routes for manifest, every daily parquet, and lookup files."""
     from httpx import Response
 
     base = "https://cache.example.test"
@@ -99,6 +138,10 @@ def mock_archive(respx_mock, archive_bytes, manifest_dict):
     )
     for kind, body in archive_bytes.items():
         respx_mock.get(f"{base}/daily/2026-04-18.{kind}.parquet").mock(
+            return_value=Response(200, content=body)
+        )
+    for name, body in lookup_bodies.items():
+        respx_mock.get(f"{base}/lookups/{name}.json").mock(
             return_value=Response(200, content=body)
         )
     return base

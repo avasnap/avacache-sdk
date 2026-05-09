@@ -191,7 +191,17 @@ export class Client {
     }
   }
 
-  private async fetch(url: string, context: string): Promise<Response> {
+  /**
+   * Issue an archive request that inherits the client's safety contract:
+   * the configured fetch (override or `globalThis.fetch`), the per-request
+   * timeout, redirect rejection (the archive is a flat bucket — any 3xx
+   * means the origin is misconfigured or compromised), and a thrown error
+   * on non-2xx. Use this for any direct archive download outside the
+   * built-in `loadDay` / `loadRange` paths (e.g. lookup JSON, ad-hoc
+   * fetches by the bundled CLI) so those callers get the same guarantees
+   * as the rest of the client.
+   */
+  async safeFetch(url: string, context: string): Promise<Response> {
     const fetchFn = this.fetchOverride ?? globalThis.fetch;
     if (!fetchFn) {
       throw new Error(
@@ -202,9 +212,6 @@ export class Client {
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       const resp = await fetchFn(url, {
-        // 'error' rejects the promise on any 3xx — the archive is a flat
-        // bucket, so a redirect means the origin is misconfigured or
-        // compromised.
         redirect: 'error',
         signal: controller.signal,
       });
@@ -242,7 +249,7 @@ export class Client {
     if (!force && this._manifest && now - this._manifestAt < MANIFEST_TTL_MS) {
       return this._manifest;
     }
-    const resp = await this.fetch(this.manifestUrl(), 'manifest fetch');
+    const resp = await this.safeFetch(this.manifestUrl(), 'manifest fetch');
     const bytes = await readBodyCapped(
       resp,
       MANIFEST_MAX_BYTES,
@@ -402,7 +409,7 @@ export class Client {
       // Node and md5 mismatched — fall through to re-download.
     }
 
-    const resp = await this.fetch(
+    const resp = await this.safeFetch(
       `${this.baseUrl}/${entry.key}`,
       `parquet fetch for ${entry.key}`,
     );

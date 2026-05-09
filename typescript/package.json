@@ -27,6 +27,9 @@
       "require": "./dist/duckdb.cjs"
     }
   },
+  "bin": {
+    "avacache": "./dist/bin.js"
+  },
   "files": [
     "dist",
     "README.md"
