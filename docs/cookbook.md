@@ -205,9 +205,14 @@ Use this only when the total result comfortably fits in memory.
 
 ### Large Windows
 
-For longer spans, load day by day. In Python, `iter_range()` is the intended
-streaming API. In TypeScript, the safest current pattern is to enumerate dates
-and call `loadDay()` yourself.
+For longer spans, load day by day. Both SDKs expose a streaming iterator —
+Python's `iter_range()` and TypeScript's `iterRange()`. Both yield one day at
+a time and prefetch the next `concurrency` files in the background.
+
+For days that don't fit as a `Row[]` even on their own (typical for full days
+of `events`), TypeScript also exposes `iterRows()` and `iterRowsRange()`,
+which walk parquet row groups and yield one row at a time. Both accept a
+`columns` projection that materializes only the fields you ask for.
 
 #### Python
 
@@ -238,12 +243,11 @@ print("total failed:", total_failed)
 import { Client } from 'avacache';
 
 const c = new Client();
-const allDates = await c.availableDates('txs');
-const wanted = allDates.filter((d) => d >= '2026-04-01' && d <= '2026-04-30');
 
 let totalFailed = 0;
-for (const day of wanted) {
-  const txs = await c.loadDay(day, 'txs');
+for await (const [day, txs] of c.iterRange('2026-04-01', '2026-04-30', 'txs', {
+  concurrency: 4,
+})) {
   const failed = txs.filter((row) => row.status === 0);
   totalFailed += failed.length;
   console.log(day, failed.length);
@@ -253,6 +257,27 @@ console.log('total failed:', totalFailed);
 ```
 
 This avoids building one huge array for a month-long or quarter-long analysis.
+
+When a single day of `events` is too large to hold as a `Row[]` — as it
+typically is for full Avalanche days — switch to `iterRowsRange()` and project
+only the columns you need:
+
+```ts
+import { Client } from 'avacache';
+
+const c = new Client();
+
+const counts = new Map<string, number>();
+for await (const row of c.iterRowsRange('2026-04-01', '2026-04-30', 'events', {
+  columns: ['topic0'],
+  concurrency: 4,
+})) {
+  const k = row.topic0 as string;
+  counts.set(k, (counts.get(k) ?? 0) + 1);
+}
+
+console.log([...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10));
+```
 
 ## Join Blocks, Transactions, And Events
 
@@ -439,11 +464,10 @@ with Client(cache_dir=cache_dir, offline=True) as offline:
 This is the right pattern for repeatable notebook work, air-gapped analysis, or
 CI tasks that should fail fast on a cache miss.
 
-### TypeScript: Warm Cache For Reuse
+### TypeScript: Strict Offline Support
 
-TypeScript does not expose a strict offline switch. You can still warm the
-cache and benefit from cache hits later, but network use is not forbidden by
-the API in the same way Python's offline mode is.
+TypeScript supports the same offline contract as Python. Warm the cache while
+online, then reopen with `offline: true` (or set `AVACACHE_OFFLINE=1`).
 
 ```ts
 import { Client } from 'avacache';
@@ -455,10 +479,13 @@ await warm.loadDay('2026-04-18', 'blocks');
 await warm.loadDay('2026-04-18', 'txs');
 await warm.loadDay('2026-04-18', 'events');
 
-const reuse = new Client({ cacheDir });
-const txs = await reuse.loadDay('2026-04-18', 'txs');
+const offline = new Client({ cacheDir, offline: true });
+const txs = await offline.loadDay('2026-04-18', 'txs');
 console.log(txs.length);
 ```
+
+In offline mode, any cache miss — including a stale in-memory manifest —
+throws rather than silently making a network request.
 
 In Node, the warmed cache lives on disk. In browsers, it lives in IndexedDB.
 

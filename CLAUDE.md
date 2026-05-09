@@ -57,7 +57,14 @@ Both clients cache under `~/.cache/avacache/v1/<chain_id>/` by default; override
 
 ### Range loading
 
-`load_range` loads the full date span into memory as one concatenated table. For multi-month ranges of `txs` or `events` that can OOM — Python exposes `iter_range()` which yields one decoded table at a time while prefetching the next `concurrency` files. The TS client currently has only `loadRange` (serial). If a user asks for a streaming TS equivalent, add `iterRange` rather than retrofitting `loadRange`.
+`load_range` loads the full date span into memory as one concatenated table. For multi-month ranges of `txs` or `events` that can OOM — Python exposes `iter_range()` which yields one decoded table at a time while prefetching the next `concurrency` files.
+
+The TS client mirrors this with three streaming primitives:
+- `iterRange(start, end, kind)` — yields `[date, Row[]]` one day at a time with bounded prefetch. Prefetches *bytes* (not decoded rows) so peak memory is `concurrency × parquet_bytes` plus one decoded day.
+- `iterRows(date, kind, { columns? })` — yields one decoded row at a time by walking parquet row groups. Use this for single-day scans that don't fit a `Row[]` in heap (e.g. a full day of `events`). Supports column projection via `columns`.
+- `iterRowsRange(start, end, kind, { columns? })` — composes the two: per-row streaming across a date range with bounded byte prefetch.
+
+Pick by what fits in memory: `Row[]` per day (`iterRange`), one row at a time (`iterRows` / `iterRowsRange`), or the whole window (`loadRange`).
 
 ## Testing notes
 
@@ -69,4 +76,4 @@ TypeScript tests (`tests/client.test.ts`) use MSW to mock the archive identicall
 
 - `AVACACHE_BASE_URL` — override archive host (both SDKs)
 - `AVACACHE_CACHE_DIR` — override local cache path (both SDKs)
-- `AVACACHE_OFFLINE=1` — Python only; refuse network, serve only from local cache. If the TS client ever grows an offline switch, use the same name.
+- `AVACACHE_OFFLINE=1` — both SDKs; refuse network, serve only from local cache.
